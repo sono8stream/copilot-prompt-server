@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Copilot Story Server</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>🚀 Copilot Story Queue Server</h1>
+      <p>複数のリクエストをキューで管理してcpilot AIに面白い話を生成させます</p>
+    </header>
+
+    <main>
+      <section class="control-panel">
+        <div class="input-group">
+          <input 
+            type="text" 
+            id="promptInput" 
+            class="prompt-input" 
+            placeholder="例: 面白い話して、プログラミングについて教えて、etc."
+            value="面白い話して"
+          />
+          <button id="requestBtn" class="btn btn-primary">✨ リクエスト送信</button>
+        </div>
+        <div id="queueStatus" class="status">
+          <span id="queueCount">キュー: 0</span>
+          <span id="runningCount">実行中: 0</span>
+        </div>
+      </section>
+
+      <section class="results-section">
+        <h2>処理結果</h2>
+        <div id="resultsList" class="results-list">
+          <div class="empty-state">
+            <p>まだリクエストがありません...</p>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <p>Node.js + Express + Socket.IO で実装されたリアルタイムキューシステム</p>
+    </footer>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="script.js"></script>
+</body>
+</html>

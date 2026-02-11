@@ -1,0 +1,66 @@
+// Simple Task Queue Manager
+class TaskQueue {
+  constructor(concurrency = 1) {
+    this.queue = [];
+    this.running = 0;
+    this.concurrency = concurrency;
+    this.onTaskComplete = null;
+    this.onTaskStart = null;
+  }
+
+  enqueue(task) {
+    const taskId = Date.now() + Math.random().toString(36).substr(2, 9);
+    const queuedTask = {
+      id: taskId,
+      task: task,
+      status: 'queued',
+      createdAt: new Date(),
+      result: null
+    };
+    
+    this.queue.push(queuedTask);
+    
+    if (this.onTaskStart) {
+      this.onTaskStart(queuedTask);
+    }
+    
+    this.process();
+    return taskId;
+  }
+
+  async process() {
+    if (this.running >= this.concurrency || this.queue.length === 0) {
+      return;
+    }
+
+    this.running++;
+    const queuedTask = this.queue.shift();
+    queuedTask.status = 'running';
+
+    try {
+      const result = await queuedTask.task();
+      queuedTask.status = 'completed';
+      queuedTask.result = result;
+    } catch (error) {
+      queuedTask.status = 'failed';
+      queuedTask.result = { error: error.message };
+    }
+
+    if (this.onTaskComplete) {
+      this.onTaskComplete(queuedTask);
+    }
+
+    this.running--;
+    this.process();
+  }
+
+  getStatus() {
+    return {
+      running: this.running,
+      queued: this.queue.length,
+      concurrency: this.concurrency
+    };
+  }
+}
+
+module.exports = TaskQueue;
