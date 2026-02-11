@@ -47,11 +47,12 @@ class TaskQueue {
       queuedTask.result = { error: error.message };
     }
 
+    // Decrement running count BEFORE calling onTaskComplete
+    this.running--;
+
     if (this.onTaskComplete) {
       this.onTaskComplete(queuedTask);
     }
-
-    this.running--;
     
     // Process next task
     if (this.queue.length > 0) {
