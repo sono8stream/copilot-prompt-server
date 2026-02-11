@@ -20,11 +20,7 @@ class TaskQueue {
     
     this.queue.push(queuedTask);
     
-    if (this.onTaskStart) {
-      this.onTaskStart(queuedTask);
-    }
-    
-    this.process();
+    setImmediate(() => this.process());
     return taskId;
   }
 
@@ -36,6 +32,11 @@ class TaskQueue {
     this.running++;
     const queuedTask = this.queue.shift();
     queuedTask.status = 'running';
+
+    // Call onTaskStart after status is set to running
+    if (this.onTaskStart) {
+      this.onTaskStart(queuedTask);
+    }
 
     try {
       const result = await queuedTask.task();
@@ -51,7 +52,11 @@ class TaskQueue {
     }
 
     this.running--;
-    this.process();
+    
+    // Process next task
+    if (this.queue.length > 0) {
+      setImmediate(() => this.process());
+    }
   }
 
   getStatus() {

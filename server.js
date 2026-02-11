@@ -141,17 +141,25 @@ taskQueue.onTaskComplete = (task) => {
 
 // Task start handler
 taskQueue.onTaskStart = (task) => {
+  console.log('Task started:', task.id);
   io.emit('task-started', {
     taskId: task.id,
     queueStatus: taskQueue.getStatus()
+  });
+  
+  writeLog({
+    event: 'task-started',
+    taskId: task.id
   });
 };
 
 // API endpoint to request a story
 app.post('/api/request-story', (req, res) => {
   const prompt = req.body?.prompt || '面白い話して';
+  console.log('📥 API Request received:', prompt);
   
   const taskId = taskQueue.enqueue(async () => {
+    console.log('🚀 Task started executing:', taskId);
     return new Promise((resolve, reject) => {
       const process = spawn('copilot', ['-p', prompt], {
         shell: true,
@@ -200,6 +208,7 @@ app.post('/api/request-story', (req, res) => {
   });
 
   // Notify all connected clients about the new task
+  console.log('📢 Broadcasting task-queued event to', io.engine.clientsCount, 'clients');
   io.emit('task-queued', {
     taskId: taskId,
     prompt: prompt,
@@ -229,6 +238,7 @@ app.get('/api/status', (req, res) => {
 // Start server
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-  console.log(`Server running on http://localhost:${PORT}`);
-  console.log('Queue system ready to process tasks');
+  console.log(`\n🚀 Server running on http://localhost:${PORT}`);
+  console.log(`📋 Queue system ready to process tasks`);
+  console.log(`🔌 Socket.IO ready for real-time updates\n`);
 });

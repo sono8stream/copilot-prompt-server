@@ -11,6 +11,21 @@ const runningCountSpan = document.getElementById('runningCount');
 // Store results locally
 let results = [];
 
+// Connection events
+socket.on('connect', () => {
+  console.log('✅ Connected to server with socket ID:', socket.id);
+  requestBtn.disabled = false;
+});
+
+socket.on('disconnect', () => {
+  console.log('❌ Disconnected from server');
+  requestBtn.disabled = true;
+});
+
+socket.on('connect_error', (error) => {
+  console.error('❌ Connection error:', error);
+});
+
 // Request button click handler
 requestBtn.addEventListener('click', () => {
   const prompt = promptInput.value.trim();
@@ -19,6 +34,7 @@ requestBtn.addEventListener('click', () => {
     return;
   }
   
+  console.log('📤 Sending request with prompt:', prompt);
   requestBtn.disabled = true;
   promptInput.disabled = true;
   
@@ -29,12 +45,12 @@ requestBtn.addEventListener('click', () => {
   })
     .then(res => res.json())
     .then(data => {
-      console.log('Story requested:', data);
+      console.log('✅ API Response:', data);
       requestBtn.disabled = false;
       promptInput.disabled = false;
     })
     .catch(err => {
-      console.error('Error requesting story:', err);
+      console.error('❌ Error requesting story:', err);
       requestBtn.disabled = false;
       promptInput.disabled = false;
       alert('リクエストに失敗しました: ' + err.message);
@@ -42,7 +58,7 @@ requestBtn.addEventListener('click', () => {
 });
 
 // Allow Enter key to submit
-prompInput.addEventListener('keypress', (e) => {
+promptInput.addEventListener('keypress', (e) => {
   if (e.key === 'Enter') {
     requestBtn.click();
   }
@@ -50,7 +66,7 @@ prompInput.addEventListener('keypress', (e) => {
 
 // Socket event handlers
 socket.on('task-queued', (data) => {
-  console.log('Task queued:', data);
+  console.log('📋 Socket: Task queued:', data);
   
   // Add new task to results
   const result = {
@@ -63,17 +79,21 @@ socket.on('task-queued', (data) => {
   };
   results.unshift(result);
   
+  console.log('📊 Results list:', results);
   updateQueueStatus(data.queueStatus);
   renderResults();
 });
 
 socket.on('task-started', (data) => {
-  console.log('Task started:', data);
+  console.log('🏃 Socket: Task started:', data);
   
   // Update task status to running
   const result = results.find(r => r.taskId === data.taskId);
   if (result) {
     result.status = 'running';
+    console.log('✏️ Updated result status to running:', result);
+  } else {
+    console.warn('⚠️ Result not found with taskId:', data.taskId);
   }
   
   updateQueueStatus(data.queueStatus);
@@ -81,11 +101,12 @@ socket.on('task-started', (data) => {
 });
 
 socket.on('task-completed', (data) => {
-  console.log('Task completed:', data);
+  console.log('✅ Socket: Task completed:', data);
   
   // Find or create result
   let result = results.find(r => r.taskId === data.taskId);
   if (!result) {
+    console.warn('⚠️ Result not found, creating new:', data.taskId);
     result = {
       taskId: data.taskId,
       createdAt: new Date(),
@@ -101,17 +122,21 @@ socket.on('task-completed', (data) => {
     completedAt: data.completedAt
   });
   
+  console.log('📊 Updated result:', result);
   updateQueueStatus(data.queueStatus);
   renderResults();
 });
 
 // Update UI functions
 function updateQueueStatus(status) {
+  console.log('🔄 Updating queue status:', status);
   queueCountSpan.textContent = `キュー: ${status.queued}`;
   runningCountSpan.textContent = `実行中: ${status.running}`;
 }
 
 function renderResults() {
+  console.log('🎨 Rendering results. Total:', results.length);
+  
   if (results.length === 0) {
     resultsList.innerHTML = `
       <div class="empty-state">
