@@ -1,11 +1,13 @@
 <!DOCTYPE html>
 <html lang="ja">
+
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Copilot Story Server</title>
   <link rel="stylesheet" href="style.css">
 </head>
+
 <body>
   <div class="container">
     <header>
@@ -16,13 +18,8 @@
     <main>
       <section class="control-panel">
         <div class="input-group">
-          <input 
-            type="text" 
-            id="promptInput" 
-            class="prompt-input" 
-            placeholder="例: 面白い話して、プログラミングについて教えて、etc."
-            value="面白い話して"
-          />
+          <input type="text" id="promptInput" class="prompt-input" placeholder="例: 面白い話して、プログラミングについて教えて、etc."
+            value="面白い話して" />
           <button id="requestBtn" class="btn btn-primary">✨ リクエスト送信</button>
         </div>
         <div id="queueStatus" class="status">
@@ -47,6 +44,8 @@
   </div>
 
   <script src="/socket.io/socket.io.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <script src="script.js"></script>
 </body>
+
 </html>

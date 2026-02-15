@@ -29,7 +29,7 @@ app.use(express.json());
 function writeLog(logEntry) {
   const timestamp = new Date().toISOString();
   const logMessage = `[${timestamp}] ${JSON.stringify(logEntry)}\n`;
-  
+
   fs.appendFile(logFilePath, logMessage, (err) => {
     if (err) {
       console.error('Failed to write log:', err);
@@ -39,6 +39,23 @@ function writeLog(logEntry) {
 
 // Task Queue with concurrency of 1
 const taskQueue = new TaskQueue(1);
+
+const tasks = [];
+const maxTaskHistory = 200;
+
+function addTaskSnapshot(task) {
+  tasks.unshift(task);
+  if (tasks.length > maxTaskHistory) {
+    tasks.length = maxTaskHistory;
+  }
+}
+
+function updateTaskSnapshot(taskId, updates) {
+  const task = tasks.find((item) => item.taskId === taskId);
+  if (task) {
+    Object.assign(task, updates);
+  }
+}
 
 // Handle socket connections
 io.on('connection', (socket) => {
@@ -51,7 +68,7 @@ io.on('connection', (socket) => {
   socket.on('request-story', (data) => {
     const prompt = data?.prompt || '面白い話して';
     console.log('Story request received:', prompt);
-    
+
     // Create a task to run copilot command
     const taskId = taskQueue.enqueue(async () => {
       return new Promise((resolve, reject) => {
@@ -69,7 +86,7 @@ io.on('connection', (socket) => {
             process.kill();
             reject(new Error('Process timeout after 30 seconds'));
           }
-        }, 30000);
+        }, 5 * 60 * 1000);
 
         process.stdout.on('data', (data) => {
           stdout += data.toString();
@@ -101,10 +118,22 @@ io.on('connection', (socket) => {
       });
     });
 
+    const snapshot = {
+      taskId: taskId,
+      prompt: prompt,
+      status: 'queued',
+      createdAt: new Date().toISOString(),
+      result: null,
+      completedAt: null
+    };
+    addTaskSnapshot(snapshot);
+
     // Notify clients about the new task
     io.emit('task-queued', {
       taskId: taskId,
       prompt: prompt,
+      status: 'queued',
+      createdAt: snapshot.createdAt,
       queueStatus: taskQueue.getStatus()
     });
 
@@ -123,9 +152,15 @@ taskQueue.onTaskComplete = (task) => {
     taskId: task.id,
     status: task.status,
     result: task.result,
-    completedAt: new Date(),
+    completedAt: new Date().toISOString(),
     queueStatus: taskQueue.getStatus()
   };
+
+  updateTaskSnapshot(task.id, {
+    status: task.status,
+    result: task.result,
+    completedAt: response.completedAt
+  });
 
   console.log('Task completed:', task.id);
   io.emit('task-completed', response);
@@ -142,11 +177,15 @@ taskQueue.onTaskComplete = (task) => {
 // Task start handler
 taskQueue.onTaskStart = (task) => {
   console.log('Task started:', task.id);
+  updateTaskSnapshot(task.id, {
+    status: 'running'
+  });
   io.emit('task-started', {
     taskId: task.id,
+    status: 'running',
     queueStatus: taskQueue.getStatus()
   });
-  
+
   writeLog({
     event: 'task-started',
     taskId: task.id
@@ -157,7 +196,7 @@ taskQueue.onTaskStart = (task) => {
 app.post('/api/request-story', (req, res) => {
   const prompt = req.body?.prompt || '面白い話して';
   console.log('📥 API Request received:', prompt);
-  
+
   const taskId = taskQueue.enqueue(async () => {
     console.log('🚀 Task started executing:', taskId);
     return new Promise((resolve, reject) => {
@@ -207,11 +246,23 @@ app.post('/api/request-story', (req, res) => {
     });
   });
 
+  const snapshot = {
+    taskId: taskId,
+    prompt: prompt,
+    status: 'queued',
+    createdAt: new Date().toISOString(),
+    result: null,
+    completedAt: null
+  };
+  addTaskSnapshot(snapshot);
+
   // Notify all connected clients about the new task
   console.log('📢 Broadcasting task-queued event to', io.engine.clientsCount, 'clients');
   io.emit('task-queued', {
     taskId: taskId,
     prompt: prompt,
+    status: 'queued',
+    createdAt: snapshot.createdAt,
     queueStatus: taskQueue.getStatus()
   });
 
@@ -233,6 +284,13 @@ app.post('/api/request-story', (req, res) => {
 // API endpoint to get queue status
 app.get('/api/status', (req, res) => {
   res.json(taskQueue.getStatus());
+});
+
+app.get('/api/tasks', (req, res) => {
+  res.json({
+    tasks: tasks,
+    queueStatus: taskQueue.getStatus()
+  });
 });
 
 // Start server

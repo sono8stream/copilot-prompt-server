@@ -1,14 +1,14 @@
 {
-  "name": "copilot-queue-server",
-  "version": "1.0.0",
-  "description": "Node.js server with process queue management for copilot commands",
-  "main": "server.js",
-  "scripts": {
-    "start": "node server.js",
-    "dev": "node server.js"
-  },
-  "dependencies": {
-    "express": "^4.18.2",
-    "socket.io": "^4.5.4"
-  }
+    "name": "copilot-queue-server",
+    "version": "1.0.0",
+    "description": "Node.js server with process queue management for copilot commands",
+    "main": "server.js",
+    "scripts": {
+        "start": "node server.js",
+        "dev": "node server.js"
+    },
+    "dependencies": {
+        "express": "^4.18.2",
+        "socket.io": "^4.5.4"
+    }
 }

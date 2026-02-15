@@ -15,6 +15,7 @@ let results = [];
 socket.on('connect', () => {
   console.log('✅ Connected to server with socket ID:', socket.id);
   requestBtn.disabled = false;
+  fetchTaskSnapshot();
 });
 
 socket.on('disconnect', () => {
@@ -33,11 +34,11 @@ requestBtn.addEventListener('click', () => {
     alert('プロンプトを入力してください');
     return;
   }
-  
+
   console.log('📤 Sending request with prompt:', prompt);
   requestBtn.disabled = true;
   promptInput.disabled = true;
-  
+
   fetch('/api/request-story', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -67,18 +68,18 @@ promptInput.addEventListener('keypress', (e) => {
 // Socket event handlers
 socket.on('task-queued', (data) => {
   console.log('📋 Socket: Task queued:', data);
-  
+
   // Add new task to results
   const result = {
     taskId: data.taskId,
     prompt: data.prompt,
-    createdAt: new Date(),
-    status: 'queued',
+    createdAt: data.createdAt ? new Date(data.createdAt) : new Date(),
+    status: data.status || 'queued',
     result: null,
     completedAt: null
   };
   results.unshift(result);
-  
+
   console.log('📊 Results list:', results);
   updateQueueStatus(data.queueStatus);
   renderResults();
@@ -86,23 +87,23 @@ socket.on('task-queued', (data) => {
 
 socket.on('task-started', (data) => {
   console.log('🏃 Socket: Task started:', data);
-  
+
   // Update task status to running
   const result = results.find(r => r.taskId === data.taskId);
   if (result) {
-    result.status = 'running';
+    result.status = data.status || 'running';
     console.log('✏️ Updated result status to running:', result);
   } else {
     console.warn('⚠️ Result not found with taskId:', data.taskId);
   }
-  
+
   updateQueueStatus(data.queueStatus);
   renderResults();
 });
 
 socket.on('task-completed', (data) => {
   console.log('✅ Socket: Task completed:', data);
-  
+
   // Find or create result
   let result = results.find(r => r.taskId === data.taskId);
   if (!result) {
@@ -114,14 +115,14 @@ socket.on('task-completed', (data) => {
     };
     results.unshift(result);
   }
-  
+
   // Update result
   Object.assign(result, {
     status: data.status,
     result: data.result,
     completedAt: data.completedAt
   });
-  
+
   console.log('📊 Updated result:', result);
   updateQueueStatus(data.queueStatus);
   renderResults();
@@ -136,7 +137,7 @@ function updateQueueStatus(status) {
 
 function renderResults() {
   console.log('🎨 Rendering results. Total:', results.length);
-  
+
   if (results.length === 0) {
     resultsList.innerHTML = `
       <div class="empty-state">
@@ -149,12 +150,35 @@ function renderResults() {
   resultsList.innerHTML = results.map(result => createResultCard(result)).join('');
 }
 
+function fetchTaskSnapshot() {
+  fetch('/api/tasks')
+    .then((res) => res.json())
+    .then((data) => {
+      if (!data || !Array.isArray(data.tasks)) {
+        return;
+      }
+      results = data.tasks.map((task) => ({
+        taskId: task.taskId,
+        prompt: task.prompt,
+        createdAt: task.createdAt ? new Date(task.createdAt) : new Date(),
+        status: task.status,
+        result: task.result,
+        completedAt: task.completedAt ? new Date(task.completedAt) : null
+      }));
+      updateQueueStatus(data.queueStatus || { queued: 0, running: 0 });
+      renderResults();
+    })
+    .catch((err) => {
+      console.error('❌ Failed to load task snapshot:', err);
+    });
+}
+
 function createResultCard(result) {
   const status = result.status || 'queued';
   const isCompleted = status === 'completed';
   const isFailed = status === 'failed';
   const isRunning = status === 'running';
-  
+
   const createdTime = new Date(result.createdAt).toLocaleString('ja-JP');
   let completedTime = '';
   if (result.completedAt) {
@@ -163,15 +187,17 @@ function createResultCard(result) {
 
   let content = '';
   if (isCompleted && result.result) {
+    const markdownText = result.result.stdout || String(result.result);
     content = `
-      <div class="card-content">
-        ${escapeHtml(result.result.stdout || result.result)}
+      <div class="card-content markdown">
+        ${renderMarkdown(markdownText)}
       </div>
     `;
   } else if (isFailed && result.result) {
+    const errorText = result.result.error || String(result.result);
     content = `
       <div class="card-content error">
-        エラー: ${escapeHtml(result.result.error || result.result)}
+        ${escapeHtml(errorText)}
       </div>
     `;
   } else if (isRunning) {
@@ -185,11 +211,26 @@ function createResultCard(result) {
         </div>
       </div>
     `;
+  } else {
+    content = `
+      <div class="card-content">
+        キュー待機中...
+      </div>
+    `;
   }
 
   const statusBadgeClass = status;
   const statusText = getStatusText(status);
   const prompt = result.prompt || '（プロンプト不明）';
+
+  const detailsOpen = isCompleted || isFailed ? 'open' : '';
+  const detailsLabel = isCompleted
+    ? '結果を表示'
+    : isFailed
+      ? 'エラー詳細'
+      : isRunning
+        ? '実行中'
+        : '待機中';
 
   return `
     <div class="result-card ${status}">
@@ -202,7 +243,10 @@ function createResultCard(result) {
         <span>📅 作成: ${createdTime}</span>
         ${completedTime ? `<span>✅ 完了: ${completedTime}</span>` : ''}
       </div>
-      ${content}
+      <details class="result-details" ${detailsOpen}>
+        <summary>${detailsLabel}</summary>
+        ${content}
+      </details>
     </div>
   `;
 }
@@ -221,6 +265,13 @@ function escapeHtml(text) {
   const div = document.createElement('div');
   div.textContent = text;
   return div.innerHTML;
+}
+
+function renderMarkdown(text) {
+  if (window.marked && typeof window.marked.parse === 'function') {
+    return window.marked.parse(text);
+  }
+  return escapeHtml(text).replace(/\n/g, '<br>');
 }
 
 // Connection events
