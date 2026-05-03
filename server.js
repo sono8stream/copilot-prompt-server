@@ -102,23 +102,6 @@ function listDirectories(relativePathInput) {
   };
 }
 
-function buildChatPromptFromMessages(messages) {
-  const recentMessages = messages.slice(-14);
-  const historyLines = recentMessages
-    .map((message) => {
-      const label = message.role === 'assistant' ? 'Assistant' : 'User';
-      return `${label}: ${message.content}`;
-    })
-    .join('\n\n');
-
-  return [
-    'あなたはGitHub Copilot CLIとして回答してください。',
-    '以下の会話履歴を踏まえ、最後の User メッセージに自然に続く返答だけを作成してください。',
-    historyLines || '会話履歴はありません。',
-    'Assistant:'
-  ].join('\n\n');
-}
-
 function stripAnsi(input) {
   return String(input || '')
     .replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '')
@@ -388,36 +371,82 @@ function schedulePendingFinalize(session) {
 }
 
 function runChatTurn(session, requestId, prompt) {
-  runOneShotCopilot({
-    taskId: `${requestId}-chat`,
-    prompt: prompt,
-    workingDirectory: session.workingDirectoryAbsolutePath,
-    onStdout: (chunk) => {
-      io.emit('chat-progress', {
-        sessionId: session.sessionId,
-        requestId: requestId,
-        data: chunk
-      });
-      if (session.pendingRequest && session.pendingRequest.requestId === requestId) {
-        session.pendingRequest.output += chunk;
-        schedulePendingFinalize(session);
-      }
-    },
-    onStderr: (chunk) => {
-      io.emit('chat-stderr', {
-        sessionId: session.sessionId,
-        requestId: requestId,
-        data: chunk
-      });
-      if (session.pendingRequest && session.pendingRequest.requestId === requestId) {
-        session.pendingRequest.output += chunk;
-        schedulePendingFinalize(session);
-      }
+  const chatTaskId = `${requestId}-chat`;
+  const copilotArgs = [
+    '-p', prompt,
+    '--stream', 'on',
+    '--no-color',
+    '--allow-all-tools'
+  ];
+
+  if (session.hasCopilotConversation) {
+    copilotArgs.push('--resume', session.copilotSessionRef);
+  } else {
+    copilotArgs.push('--name', session.copilotSessionRef);
+  }
+
+  const process = spawn(copilotCommand, copilotArgs, {
+    windowsHide: true,
+    cwd: session.workingDirectoryAbsolutePath
+  });
+
+  let completed = false;
+  const timeout = setTimeout(() => {
+    if (!completed) {
+      process.kill();
+      completePendingRequest(session, { failed: true, error: 'Process timeout after 5 minutes' });
     }
-  })
-    .catch((error) => {
-      completePendingRequest(session, { failed: true, error: error.message });
+  }, 5 * 60 * 1000);
+
+  process.stdout.on('data', (data) => {
+    const chunk = data.toString();
+    io.emit('chat-progress', {
+      sessionId: session.sessionId,
+      requestId: requestId,
+      data: chunk
     });
+    if (session.pendingRequest && session.pendingRequest.requestId === requestId) {
+      session.pendingRequest.output += chunk;
+      schedulePendingFinalize(session);
+    }
+  });
+
+  process.stderr.on('data', (data) => {
+    const chunk = data.toString();
+    io.emit('chat-stderr', {
+      sessionId: session.sessionId,
+      requestId: requestId,
+      data: chunk
+    });
+    if (session.pendingRequest && session.pendingRequest.requestId === requestId) {
+      session.pendingRequest.output += chunk;
+      schedulePendingFinalize(session);
+    }
+  });
+
+  process.on('close', (code) => {
+    completed = true;
+    clearTimeout(timeout);
+    if (code === 0) {
+      session.hasCopilotConversation = true;
+      return;
+    }
+    completePendingRequest(session, { failed: true, error: `Process exited with code ${code}` });
+  });
+
+  process.on('error', (error) => {
+    completed = true;
+    clearTimeout(timeout);
+    completePendingRequest(session, { failed: true, error: error.message });
+  });
+
+  writeLog({
+    event: 'chat-turn-started',
+    taskId: chatTaskId,
+    sessionId: session.sessionId,
+    requestId: requestId,
+    mode: session.hasCopilotConversation ? 'resume' : 'name'
+  });
 }
 
 io.on('connection', (socket) => {
@@ -504,7 +533,9 @@ app.post('/api/chat-sessions', (req, res) => {
       status: 'ready',
       messages: [],
       pendingRequest: null,
-      requestQueue: []
+      requestQueue: [],
+      copilotSessionRef: `webui-${generateId()}`,
+      hasCopilotConversation: false
     };
     chatSessions.set(session.sessionId, session);
 
@@ -566,11 +597,10 @@ app.post('/api/chat-sessions/:sessionId/messages', (req, res) => {
     message: userMessage
   });
 
-  const prompt = buildChatPromptFromMessages(session.messages);
   session.requestQueue.push({
     requestId: requestId,
     userInput: messageText,
-    prompt: prompt
+    prompt: messageText
   });
   processNextQueuedRequest(session);
 
