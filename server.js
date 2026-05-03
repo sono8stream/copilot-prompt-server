@@ -4,32 +4,36 @@ const socketIO = require('socket.io');
 const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
 const TaskQueue = require('./queue');
 
-// Setup logs directory
+const homeDirectory = os.homedir();
+const copilotCommand = process.env.COPILOT_BIN || 'copilot';
+
 const logsDir = path.join(__dirname, 'logs');
 if (!fs.existsSync(logsDir)) {
   fs.mkdirSync(logsDir, { recursive: true });
 }
 
-// Log file path
+const sessionsDir = path.join(logsDir, 'sessions');
+if (!fs.existsSync(sessionsDir)) {
+  fs.mkdirSync(sessionsDir, { recursive: true });
+}
+
 const logFilePath = path.join(logsDir, `copilot-requests-${new Date().toISOString().split('T')[0]}.log`);
 
 const app = express();
 const server = http.createServer(app);
 const io = socketIO(server, {
-  cors: { origin: "*" }
+  cors: { origin: '*' }
 });
 
-// Serve static files
 app.use(express.static(path.join(__dirname, 'public')));
 app.use(express.json());
 
-// Utility function to write logs
 function writeLog(logEntry) {
   const timestamp = new Date().toISOString();
   const logMessage = `[${timestamp}] ${JSON.stringify(logEntry)}\n`;
-
   fs.appendFile(logFilePath, logMessage, (err) => {
     if (err) {
       console.error('Failed to write log:', err);
@@ -37,11 +41,116 @@ function writeLog(logEntry) {
   });
 }
 
-// Task Queue with concurrency of 1
-const taskQueue = new TaskQueue(1);
+function generateId() {
+  return Date.now() + Math.random().toString(36).slice(2, 11);
+}
 
+function normalizeRelativePath(relativePathInput) {
+  const relativePath = typeof relativePathInput === 'string'
+    ? relativePathInput.trim().replace(/\\/g, '/')
+    : '';
+  return relativePath === '.' ? '' : relativePath;
+}
+
+function resolveHomeDirectory(relativePathInput) {
+  const normalizedRelativePath = normalizeRelativePath(relativePathInput);
+  const absolutePath = path.resolve(homeDirectory, normalizedRelativePath || '.');
+  const relativeFromHome = path.relative(homeDirectory, absolutePath);
+
+  if (relativeFromHome.startsWith('..') || path.isAbsolute(relativeFromHome)) {
+    throw new Error('ホームディレクトリ外のパスは指定できません');
+  }
+  if (!fs.existsSync(absolutePath)) {
+    throw new Error('指定されたフォルダが存在しません');
+  }
+  if (!fs.statSync(absolutePath).isDirectory()) {
+    throw new Error('指定されたパスはフォルダではありません');
+  }
+
+  return {
+    absolutePath: absolutePath,
+    relativePath: relativeFromHome === '' ? '' : relativeFromHome.replace(/\\/g, '/')
+  };
+}
+
+function listDirectories(relativePathInput) {
+  const { absolutePath, relativePath } = resolveHomeDirectory(relativePathInput);
+  const entries = fs.readdirSync(absolutePath, { withFileTypes: true });
+  const directories = entries
+    .filter((entry) => entry.isDirectory() && !entry.isSymbolicLink())
+    .map((entry) => {
+      const childRelativePath = relativePath ? `${relativePath}/${entry.name}` : entry.name;
+      return {
+        name: entry.name,
+        relativePath: childRelativePath
+      };
+    })
+    .sort((a, b) => a.name.localeCompare(b.name));
+
+  const parentRelativePath = relativePath
+    ? path.posix.dirname(relativePath) === '.'
+      ? ''
+      : path.posix.dirname(relativePath)
+    : null;
+
+  return {
+    homeDirectory: homeDirectory,
+    absolutePath: absolutePath,
+    relativePath: relativePath,
+    parentRelativePath: parentRelativePath,
+    directories: directories
+  };
+}
+
+function buildChatPromptFromMessages(messages) {
+  const recentMessages = messages.slice(-14);
+  const historyLines = recentMessages
+    .map((message) => {
+      const label = message.role === 'assistant' ? 'Assistant' : 'User';
+      return `${label}: ${message.content}`;
+    })
+    .join('\n\n');
+
+  return [
+    'あなたはGitHub Copilot CLIとして回答してください。',
+    '以下の会話履歴を踏まえ、最後の User メッセージに自然に続く返答だけを作成してください。',
+    historyLines || '会話履歴はありません。',
+    'Assistant:'
+  ].join('\n\n');
+}
+
+function stripAnsi(input) {
+  return String(input || '')
+    .replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '')
+    .replace(/\x1B\][^\x07]*(\x07|\x1B\\)/g, '')
+    .replace(/\x1B[@-_]/g, '');
+}
+
+function sanitizeAssistantOutput(rawOutput, userInput) {
+  const normalized = stripAnsi(rawOutput).replace(/\r/g, '');
+  const inputTrimmed = String(userInput || '').trim();
+  const lines = normalized.split('\n');
+  const filtered = lines.filter((line) => {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      return true;
+    }
+    if (trimmed === inputTrimmed) {
+      return false;
+    }
+    if (/^(Changes|Requests|Tokens|Session expires|Session exported to:|API time spent|Total session time|Total usage est)/.test(trimmed)) {
+      return false;
+    }
+    return true;
+  });
+  return filtered.join('\n').trim();
+}
+
+const taskQueue = new TaskQueue(1);
 const tasks = [];
 const maxTaskHistory = 200;
+const taskContexts = new Map();
+const chatSessions = new Map();
 
 function addTaskSnapshot(task) {
   tasks.unshift(task);
@@ -57,7 +166,260 @@ function updateTaskSnapshot(taskId, updates) {
   }
 }
 
-// Handle socket connections
+function runOneShotCopilot({ taskId, prompt, workingDirectory, onStdout, onStderr }) {
+  return new Promise((resolve, reject) => {
+    const sessionFile = path.join(sessionsDir, `${taskId}.md`);
+    const process = spawn(copilotCommand, [
+      '-p', prompt,
+      '--stream', 'on',
+      '--no-color',
+      '--allow-all-tools',
+      '--share', sessionFile
+    ], {
+      windowsHide: true,
+      cwd: workingDirectory
+    });
+
+    let stdout = '';
+    let stderr = '';
+    let completed = false;
+    const timeout = setTimeout(() => {
+      if (!completed) {
+        process.kill();
+        reject(new Error('Process timeout after 5 minutes'));
+      }
+    }, 5 * 60 * 1000);
+
+    process.stdout.on('data', (data) => {
+      const chunk = data.toString();
+      stdout += chunk;
+      if (onStdout) {
+        onStdout(chunk);
+      }
+    });
+
+    process.stderr.on('data', (data) => {
+      const chunk = data.toString();
+      stderr += chunk;
+      if (onStderr) {
+        onStderr(chunk);
+      }
+    });
+
+    process.on('close', (code) => {
+      clearTimeout(timeout);
+      completed = true;
+      if (code === 0) {
+        resolve({
+          stdout: stdout.trim(),
+          stderr: stderr.trim(),
+          sessionFile: fs.existsSync(sessionFile) ? sessionFile : null,
+          code: code
+        });
+      } else {
+        reject(new Error(`Process exited with code ${code}: ${stderr || stdout}`));
+      }
+    });
+
+    process.on('error', (err) => {
+      clearTimeout(timeout);
+      completed = true;
+      reject(err);
+    });
+  });
+}
+
+function enqueueCopilotTask({ prompt, taskType, workingDirectory, sessionId = null }) {
+  let taskId = '';
+  taskId = taskQueue.enqueue(async () => {
+    return runOneShotCopilot({
+      taskId: taskId,
+      prompt: prompt,
+      workingDirectory: workingDirectory,
+      onStdout: (chunk) => io.emit('task-progress', { taskId, type: 'stdout', data: chunk }),
+      onStderr: (chunk) => io.emit('task-progress', { taskId, type: 'stderr', data: chunk })
+    });
+  });
+
+  taskContexts.set(taskId, {
+    taskType: taskType,
+    sessionId: sessionId,
+    prompt: prompt,
+    workingDirectory: workingDirectory
+  });
+
+  const snapshot = {
+    taskId: taskId,
+    prompt: prompt,
+    taskType: taskType,
+    sessionId: sessionId,
+    workingDirectory: workingDirectory,
+    status: 'queued',
+    createdAt: new Date().toISOString(),
+    result: null,
+    completedAt: null
+  };
+  addTaskSnapshot(snapshot);
+
+  io.emit('task-queued', {
+    taskId: taskId,
+    prompt: prompt,
+    taskType: taskType,
+    sessionId: sessionId,
+    status: 'queued',
+    createdAt: snapshot.createdAt,
+    queueStatus: taskQueue.getStatus()
+  });
+
+  return taskId;
+}
+
+function serializeChatSession(session) {
+  return {
+    sessionId: session.sessionId,
+    workingDirectoryRelativePath: session.workingDirectoryRelativePath,
+    workingDirectoryAbsolutePath: session.workingDirectoryAbsolutePath,
+    createdAt: session.createdAt,
+    updatedAt: session.updatedAt,
+    status: session.status,
+    messages: session.messages,
+    pendingCount: (session.pendingRequest ? 1 : 0) + (session.requestQueue ? session.requestQueue.length : 0)
+  };
+}
+
+function clearPendingTimers(session) {
+  if (!session.pendingRequest) {
+    return;
+  }
+  if (session.pendingRequest.finalizeTimer) {
+    clearTimeout(session.pendingRequest.finalizeTimer);
+    session.pendingRequest.finalizeTimer = null;
+  }
+  if (session.pendingRequest.timeoutTimer) {
+    clearTimeout(session.pendingRequest.timeoutTimer);
+    session.pendingRequest.timeoutTimer = null;
+  }
+}
+
+function processNextQueuedRequest(session) {
+  if (session.pendingRequest || !session.requestQueue || session.requestQueue.length === 0) {
+    return;
+  }
+
+  const nextRequest = session.requestQueue.shift();
+  session.pendingRequest = {
+    requestId: nextRequest.requestId,
+    output: '',
+    userInput: nextRequest.userInput,
+    finalizeTimer: null,
+    timeoutTimer: setTimeout(() => {
+      completePendingRequest(session, {
+        failed: true,
+        error: 'AI応答がタイムアウトしました。再送してください。'
+      });
+    }, 30 * 1000)
+  };
+
+  io.emit('chat-request-started', {
+    sessionId: session.sessionId,
+    requestId: nextRequest.requestId
+  });
+
+  runChatTurn(session, nextRequest.requestId, nextRequest.prompt);
+}
+
+function completePendingRequest(session, { failed = false, error = '' } = {}) {
+  if (!session.pendingRequest) {
+    return;
+  }
+  const pending = session.pendingRequest;
+  clearPendingTimers(session);
+  session.pendingRequest = null;
+
+  if (failed) {
+    io.emit('chat-message-failed', {
+      sessionId: session.sessionId,
+      requestId: pending.requestId,
+      error: error || 'Copilot process failed'
+    });
+    processNextQueuedRequest(session);
+    return;
+  }
+
+  const content = sanitizeAssistantOutput(pending.output, pending.userInput);
+  if (!content) {
+    io.emit('chat-message-failed', {
+      sessionId: session.sessionId,
+      requestId: pending.requestId,
+      error: 'AIの応答が空でした。再送してください。'
+    });
+    processNextQueuedRequest(session);
+    return;
+  }
+
+  const assistantMessage = {
+    messageId: generateId(),
+    role: 'assistant',
+    content: content,
+    createdAt: new Date().toISOString()
+  };
+  session.messages.push(assistantMessage);
+  session.updatedAt = assistantMessage.createdAt;
+
+  io.emit('chat-message', {
+    sessionId: session.sessionId,
+    requestId: pending.requestId,
+    message: assistantMessage
+  });
+
+  processNextQueuedRequest(session);
+}
+
+function schedulePendingFinalize(session) {
+  if (!session.pendingRequest) {
+    return;
+  }
+  if (session.pendingRequest.finalizeTimer) {
+    clearTimeout(session.pendingRequest.finalizeTimer);
+  }
+  session.pendingRequest.finalizeTimer = setTimeout(() => {
+    completePendingRequest(session);
+  }, 1200);
+}
+
+function runChatTurn(session, requestId, prompt) {
+  runOneShotCopilot({
+    taskId: `${requestId}-chat`,
+    prompt: prompt,
+    workingDirectory: session.workingDirectoryAbsolutePath,
+    onStdout: (chunk) => {
+      io.emit('chat-progress', {
+        sessionId: session.sessionId,
+        requestId: requestId,
+        data: chunk
+      });
+      if (session.pendingRequest && session.pendingRequest.requestId === requestId) {
+        session.pendingRequest.output += chunk;
+        schedulePendingFinalize(session);
+      }
+    },
+    onStderr: (chunk) => {
+      io.emit('chat-stderr', {
+        sessionId: session.sessionId,
+        requestId: requestId,
+        data: chunk
+      });
+      if (session.pendingRequest && session.pendingRequest.requestId === requestId) {
+        session.pendingRequest.output += chunk;
+        schedulePendingFinalize(session);
+      }
+    }
+  })
+    .catch((error) => {
+      completePendingRequest(session, { failed: true, error: error.message });
+    });
+}
+
 io.on('connection', (socket) => {
   console.log('Client connected:', socket.id);
 
@@ -67,213 +429,174 @@ io.on('connection', (socket) => {
 
   socket.on('request-story', (data) => {
     const prompt = data?.prompt || '面白い話して';
-    console.log('Story request received:', prompt);
-
-    // Create a task to run copilot command
-    const taskId = taskQueue.enqueue(async () => {
-      return new Promise((resolve, reject) => {
-        const process = spawn('copilot', ['-p', prompt], {
-          shell: true,
-          windowsHide: true
-        });
-
-        let stdout = '';
-        let stderr = '';
-        let completed = false;
-
-        const timeout = setTimeout(() => {
-          if (!completed) {
-            process.kill();
-            reject(new Error('Process timeout after 30 seconds'));
-          }
-        }, 5 * 60 * 1000);
-
-        process.stdout.on('data', (data) => {
-          stdout += data.toString();
-        });
-
-        process.stderr.on('data', (data) => {
-          stderr += data.toString();
-        });
-
-        process.on('close', (code) => {
-          clearTimeout(timeout);
-          completed = true;
-          if (code === 0) {
-            resolve({
-              stdout: stdout.trim(),
-              stderr: stderr.trim(),
-              code: code
-            });
-          } else {
-            reject(new Error(`Process exited with code ${code}: ${stderr}`));
-          }
-        });
-
-        process.on('error', (err) => {
-          clearTimeout(timeout);
-          completed = true;
-          reject(err);
-        });
-      });
-    });
-
-    const snapshot = {
-      taskId: taskId,
+    enqueueCopilotTask({
       prompt: prompt,
-      status: 'queued',
-      createdAt: new Date().toISOString(),
-      result: null,
-      completedAt: null
-    };
-    addTaskSnapshot(snapshot);
-
-    // Notify clients about the new task
-    io.emit('task-queued', {
-      taskId: taskId,
-      prompt: prompt,
-      status: 'queued',
-      createdAt: snapshot.createdAt,
-      queueStatus: taskQueue.getStatus()
-    });
-
-    // Log task queued
-    writeLog({
-      event: 'task-queued',
-      taskId: taskId,
-      prompt: prompt
+      taskType: 'story',
+      workingDirectory: __dirname
     });
   });
 });
 
-// Task completion handler
 taskQueue.onTaskComplete = (task) => {
+  const context = taskContexts.get(task.id) || {};
+  const hasSession = task.result?.sessionFile
+    ? fs.existsSync(task.result.sessionFile)
+    : false;
   const response = {
     taskId: task.id,
     status: task.status,
     result: task.result,
+    taskType: context.taskType || 'story',
+    sessionId: context.sessionId || null,
     completedAt: new Date().toISOString(),
+    hasSession: hasSession,
     queueStatus: taskQueue.getStatus()
   };
 
   updateTaskSnapshot(task.id, {
     status: task.status,
     result: task.result,
-    completedAt: response.completedAt
+    completedAt: response.completedAt,
+    hasSession: hasSession
   });
-
-  console.log('Task completed:', task.id);
   io.emit('task-completed', response);
-
-  // Log task completion
-  writeLog({
-    event: 'task-completed',
-    taskId: task.id,
-    status: task.status,
-    result: task.result
-  });
+  taskContexts.delete(task.id);
 };
 
-// Task start handler
 taskQueue.onTaskStart = (task) => {
-  console.log('Task started:', task.id);
-  updateTaskSnapshot(task.id, {
-    status: 'running'
-  });
+  const context = taskContexts.get(task.id) || {};
+  updateTaskSnapshot(task.id, { status: 'running' });
   io.emit('task-started', {
     taskId: task.id,
+    taskType: context.taskType || 'story',
+    sessionId: context.sessionId || null,
     status: 'running',
     queueStatus: taskQueue.getStatus()
   });
-
-  writeLog({
-    event: 'task-started',
-    taskId: task.id
-  });
 };
 
-// API endpoint to request a story
-app.post('/api/request-story', (req, res) => {
-  const prompt = req.body?.prompt || '面白い話して';
-  console.log('📥 API Request received:', prompt);
-
-  const taskId = taskQueue.enqueue(async () => {
-    console.log('🚀 Task started executing:', taskId);
-    return new Promise((resolve, reject) => {
-      const process = spawn('copilot', ['-p', prompt], {
-        shell: true,
-        windowsHide: true
-      });
-
-      let stdout = '';
-      let stderr = '';
-      let completed = false;
-
-      const timeout = setTimeout(() => {
-        if (!completed) {
-          process.kill();
-          reject(new Error('Process timeout after 30 seconds'));
-        }
-      }, 30000);
-
-      process.stdout.on('data', (data) => {
-        stdout += data.toString();
-      });
-
-      process.stderr.on('data', (data) => {
-        stderr += data.toString();
-      });
-
-      process.on('close', (code) => {
-        clearTimeout(timeout);
-        completed = true;
-        if (code === 0) {
-          resolve({
-            stdout: stdout.trim(),
-            stderr: stderr.trim(),
-            code: code
-          });
-        } else {
-          reject(new Error(`Process exited with code ${code}`));
-        }
-      });
-
-      process.on('error', (err) => {
-        clearTimeout(timeout);
-        completed = true;
-        reject(err);
-      });
+app.get('/api/directories', (req, res) => {
+  try {
+    const currentPath = typeof req.query.path === 'string' ? req.query.path : '';
+    const result = listDirectories(currentPath);
+    res.json({
+      homeDirectory: result.homeDirectory,
+      currentRelativePath: result.relativePath,
+      currentAbsolutePath: result.absolutePath,
+      parentRelativePath: result.parentRelativePath,
+      directories: result.directories
     });
-  });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
 
-  const snapshot = {
-    taskId: taskId,
-    prompt: prompt,
-    status: 'queued',
-    createdAt: new Date().toISOString(),
-    result: null,
-    completedAt: null
+app.post('/api/chat-sessions', (req, res) => {
+  try {
+    const requestedPath = req.body?.workingDirectory || '';
+    const { absolutePath, relativePath } = resolveHomeDirectory(requestedPath);
+    const session = {
+      sessionId: generateId(),
+      workingDirectoryRelativePath: relativePath,
+      workingDirectoryAbsolutePath: absolutePath,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      status: 'ready',
+      messages: [],
+      pendingRequest: null,
+      requestQueue: []
+    };
+    chatSessions.set(session.sessionId, session);
+
+    writeLog({
+      event: 'chat-session-created',
+      sessionId: session.sessionId,
+      workingDirectoryRelativePath: session.workingDirectoryRelativePath,
+      workingDirectoryAbsolutePath: session.workingDirectoryAbsolutePath
+    });
+
+    res.json(serializeChatSession(session));
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.get('/api/chat-sessions/:sessionId', (req, res) => {
+  const session = chatSessions.get(req.params.sessionId);
+  if (!session) {
+    return res.status(404).json({ error: 'Chat session not found' });
+  }
+  res.json(serializeChatSession(session));
+});
+
+app.delete('/api/chat-sessions/:sessionId', (req, res) => {
+  const session = chatSessions.get(req.params.sessionId);
+  if (!session) {
+    return res.status(404).json({ error: 'Chat session not found' });
+  }
+  clearPendingTimers(session);
+  session.requestQueue = [];
+  chatSessions.delete(req.params.sessionId);
+  res.json({ message: 'Chat session closed' });
+});
+
+app.post('/api/chat-sessions/:sessionId/messages', (req, res) => {
+  const session = chatSessions.get(req.params.sessionId);
+  if (!session) {
+    return res.status(404).json({ error: 'Chat session not found' });
+  }
+  const messageText = typeof req.body?.message === 'string' ? req.body.message.trim() : '';
+  if (!messageText) {
+    return res.status(400).json({ error: 'message is required' });
+  }
+
+  const userMessage = {
+    messageId: generateId(),
+    role: 'user',
+    content: messageText,
+    createdAt: new Date().toISOString()
   };
-  addTaskSnapshot(snapshot);
+  const requestId = generateId();
 
-  // Notify all connected clients about the new task
-  console.log('📢 Broadcasting task-queued event to', io.engine.clientsCount, 'clients');
-  io.emit('task-queued', {
-    taskId: taskId,
-    prompt: prompt,
-    status: 'queued',
-    createdAt: snapshot.createdAt,
-    queueStatus: taskQueue.getStatus()
+  session.messages.push(userMessage);
+  session.updatedAt = userMessage.createdAt;
+  io.emit('chat-message', {
+    sessionId: session.sessionId,
+    requestId: requestId,
+    message: userMessage
   });
 
-  // Log API request
-  writeLog({
-    event: 'api-request',
-    endpoint: '/api/request-story',
-    taskId: taskId,
+  const prompt = buildChatPromptFromMessages(session.messages);
+  session.requestQueue.push({
+    requestId: requestId,
+    userInput: messageText,
     prompt: prompt
   });
+  processNextQueuedRequest(session);
 
+  writeLog({
+    event: 'chat-message-sent',
+    sessionId: session.sessionId,
+    requestId: requestId,
+    messageId: userMessage.messageId,
+    workingDirectory: session.workingDirectoryAbsolutePath
+  });
+
+  res.json({
+    sessionId: session.sessionId,
+    requestId: requestId,
+    message: userMessage,
+    queueLength: session.requestQueue.length + (session.pendingRequest ? 1 : 0)
+  });
+});
+
+app.post('/api/request-story', (req, res) => {
+  const prompt = req.body?.prompt || '面白い話して';
+  const taskId = enqueueCopilotTask({
+    prompt: prompt,
+    taskType: 'story',
+    workingDirectory: __dirname
+  });
   res.json({
     taskId: taskId,
     queueStatus: taskQueue.getStatus(),
@@ -281,7 +604,6 @@ app.post('/api/request-story', (req, res) => {
   });
 });
 
-// API endpoint to get queue status
 app.get('/api/status', (req, res) => {
   res.json(taskQueue.getStatus());
 });
@@ -293,10 +615,18 @@ app.get('/api/tasks', (req, res) => {
   });
 });
 
-// Start server
+app.get('/api/tasks/:taskId/session', (req, res) => {
+  const sessionFile = path.join(sessionsDir, `${req.params.taskId}.md`);
+  if (!fs.existsSync(sessionFile)) {
+    return res.status(404).json({ error: 'Session log not found' });
+  }
+  res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
+  res.sendFile(sessionFile);
+});
+
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
   console.log(`\n🚀 Server running on http://localhost:${PORT}`);
-  console.log(`📋 Queue system ready to process tasks`);
-  console.log(`🔌 Socket.IO ready for real-time updates\n`);
+  console.log('📋 Queue system ready to process tasks');
+  console.log('🔌 Socket.IO ready for real-time updates\n');
 });

@@ -1,289 +1,492 @@
-// Socket.IO connection
 const socket = io();
 
-// DOM elements
-const requestBtn = document.getElementById('requestBtn');
-const promptInput = document.getElementById('promptInput');
-const resultsList = document.getElementById('resultsList');
+const directoryList = document.getElementById('directoryList');
+const currentPathLabel = document.getElementById('currentPathLabel');
+const selectedFolderLabel = document.getElementById('selectedFolderLabel');
+const upDirBtn = document.getElementById('upDirBtn');
+const reloadDirBtn = document.getElementById('reloadDirBtn');
+const startSessionBtn = document.getElementById('startSessionBtn');
+
+const chatMeta = document.getElementById('chatMeta');
+const aiStatus = document.getElementById('aiStatus');
+const aiStatusText = document.getElementById('aiStatusText');
+const aiStatusElapsed = document.getElementById('aiStatusElapsed');
+const chatMessages = document.getElementById('chatMessages');
+const messageInput = document.getElementById('messageInput');
+const sendBtn = document.getElementById('sendBtn');
+
 const queueCountSpan = document.getElementById('queueCount');
 const runningCountSpan = document.getElementById('runningCount');
 
-// Store results locally
-let results = [];
+let currentRelativePath = '';
+let parentRelativePath = null;
+let selectedRelativePath = '';
+let activeSessionId = null;
+let activeRequestId = null;
+let activeRequestStartedAt = null;
+const pendingRequestIds = [];
+const renderedMessageIds = new Set();
+const streamingByRequestId = {};
+let aiRespondingSince = null;
+let aiStatusTimerId = null;
+let sessionSyncTimerId = null;
 
-// Connection events
 socket.on('connect', () => {
-  console.log('✅ Connected to server with socket ID:', socket.id);
-  requestBtn.disabled = false;
-  fetchTaskSnapshot();
+  startSessionBtn.disabled = false;
+  loadDirectories(currentRelativePath);
+  fetchQueueStatus();
+  if (!activeSessionId) {
+    setAiStatus('idle', 'AI状態: セッション未開始');
+  }
 });
 
 socket.on('disconnect', () => {
-  console.log('❌ Disconnected from server');
-  requestBtn.disabled = true;
+  startSessionBtn.disabled = true;
+  disableMessageInput();
+  setAiStatus('error', 'AI状態: サーバー未接続');
+  stopSessionSyncPolling();
 });
 
-socket.on('connect_error', (error) => {
-  console.error('❌ Connection error:', error);
-});
-
-// Request button click handler
-requestBtn.addEventListener('click', () => {
-  const prompt = promptInput.value.trim();
-  if (!prompt) {
-    alert('プロンプトを入力してください');
-    return;
-  }
-
-  console.log('📤 Sending request with prompt:', prompt);
-  requestBtn.disabled = true;
-  promptInput.disabled = true;
-
-  fetch('/api/request-story', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ prompt: prompt })
-  })
-    .then(res => res.json())
-    .then(data => {
-      console.log('✅ API Response:', data);
-      requestBtn.disabled = false;
-      promptInput.disabled = false;
-    })
-    .catch(err => {
-      console.error('❌ Error requesting story:', err);
-      requestBtn.disabled = false;
-      promptInput.disabled = false;
-      alert('リクエストに失敗しました: ' + err.message);
-    });
-});
-
-// Allow Enter key to submit
-promptInput.addEventListener('keypress', (e) => {
-  if (e.key === 'Enter') {
-    requestBtn.click();
-  }
-});
-
-// Socket event handlers
 socket.on('task-queued', (data) => {
-  console.log('📋 Socket: Task queued:', data);
-
-  // Add new task to results
-  const result = {
-    taskId: data.taskId,
-    prompt: data.prompt,
-    createdAt: data.createdAt ? new Date(data.createdAt) : new Date(),
-    status: data.status || 'queued',
-    result: null,
-    completedAt: null
-  };
-  results.unshift(result);
-
-  console.log('📊 Results list:', results);
-  updateQueueStatus(data.queueStatus);
-  renderResults();
+  if (data.queueStatus) {
+    updateQueueStatus(data.queueStatus);
+  }
 });
 
 socket.on('task-started', (data) => {
-  console.log('🏃 Socket: Task started:', data);
-
-  // Update task status to running
-  const result = results.find(r => r.taskId === data.taskId);
-  if (result) {
-    result.status = data.status || 'running';
-    console.log('✏️ Updated result status to running:', result);
-  } else {
-    console.warn('⚠️ Result not found with taskId:', data.taskId);
+  if (data.queueStatus) {
+    updateQueueStatus(data.queueStatus);
   }
-
-  updateQueueStatus(data.queueStatus);
-  renderResults();
 });
 
 socket.on('task-completed', (data) => {
-  console.log('✅ Socket: Task completed:', data);
-
-  // Find or create result
-  let result = results.find(r => r.taskId === data.taskId);
-  if (!result) {
-    console.warn('⚠️ Result not found, creating new:', data.taskId);
-    result = {
-      taskId: data.taskId,
-      createdAt: new Date(),
-      status: 'queued'
-    };
-    results.unshift(result);
+  if (data.queueStatus) {
+    updateQueueStatus(data.queueStatus);
   }
-
-  // Update result
-  Object.assign(result, {
-    status: data.status,
-    result: data.result,
-    completedAt: data.completedAt
-  });
-
-  console.log('📊 Updated result:', result);
-  updateQueueStatus(data.queueStatus);
-  renderResults();
 });
 
-// Update UI functions
+socket.on('chat-message', (payload) => {
+  if (!payload || payload.sessionId !== activeSessionId || !payload.message) {
+    return;
+  }
+  if (payload.requestId && streamingByRequestId[payload.requestId] && payload.message.role === 'assistant') {
+    finalizeStreamingMessage(payload.requestId, payload.message);
+  } else {
+    appendMessage(payload.message);
+  }
+  if (payload.requestId && streamingByRequestId[payload.requestId] && payload.message.role !== 'assistant') {
+    removeStreamingMessage(payload.requestId);
+  }
+  if (payload.requestId && payload.requestId === activeRequestId && payload.message.role === 'assistant') {
+    shiftCompletedRequest(payload.requestId);
+  }
+});
+
+socket.on('chat-progress', (payload) => {
+  if (!payload || payload.sessionId !== activeSessionId || !payload.requestId) {
+    return;
+  }
+  if (payload.requestId === activeRequestId) {
+    setAiStatus('responding', 'AI状態: 回答中...');
+  }
+  appendStreamingChunk(payload.requestId, payload.data || '');
+});
+
+socket.on('chat-stderr', (payload) => {
+  if (!payload || payload.sessionId !== activeSessionId || !payload.requestId) {
+    return;
+  }
+  if (payload.requestId === activeRequestId) {
+    setAiStatus('responding', 'AI状態: 回答中...');
+  }
+  appendStreamingChunk(payload.requestId, payload.data || '');
+});
+
+socket.on('chat-request-completed', (payload) => {
+  if (!payload || payload.sessionId !== activeSessionId || payload.requestId !== activeRequestId) {
+    return;
+  }
+  removeStreamingMessage(payload.requestId);
+  shiftCompletedRequest(payload.requestId);
+});
+
+socket.on('chat-message-failed', (payload) => {
+  if (!payload || payload.sessionId !== activeSessionId) {
+    return;
+  }
+  if (payload.requestId) {
+    removeStreamingMessage(payload.requestId);
+  }
+  appendMessage({
+    messageId: `error-${payload.requestId || Date.now()}`,
+    role: 'assistant',
+    content: `エラー: ${payload.error || 'unknown error'}`,
+    createdAt: new Date().toISOString()
+  });
+  if (!payload.requestId || payload.requestId === activeRequestId) {
+    shiftCompletedRequest(payload.requestId);
+    setAiStatus('error', 'AI状態: エラー');
+  }
+});
+
+socket.on('chat-process-exited', (payload) => {
+  if (!payload || payload.sessionId !== activeSessionId) {
+    return;
+  }
+  appendMessage({
+    messageId: `process-exited-${Date.now()}`,
+    role: 'assistant',
+    content: 'Copilot プロセスが終了しました。セッションを作り直してください。',
+    createdAt: new Date().toISOString()
+  });
+  activeRequestId = null;
+  activeRequestStartedAt = null;
+  pendingRequestIds.length = 0;
+  disableMessageInput();
+  setAiStatus('error', 'AI状態: プロセス終了');
+  stopSessionSyncPolling();
+});
+
+upDirBtn.addEventListener('click', () => {
+  if (parentRelativePath === null) return;
+  loadDirectories(parentRelativePath);
+});
+
+reloadDirBtn.addEventListener('click', () => {
+  loadDirectories(currentRelativePath);
+});
+
+startSessionBtn.addEventListener('click', () => {
+  if (!selectedRelativePath) {
+    alert('フォルダを選択してください');
+    return;
+  }
+
+  startSessionBtn.disabled = true;
+  fetch('/api/chat-sessions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ workingDirectory: selectedRelativePath })
+  })
+    .then((res) => res.json())
+    .then((data) => {
+      if (data.error) {
+        throw new Error(data.error);
+      }
+      activeSessionId = data.sessionId;
+      activeRequestId = null;
+      activeRequestStartedAt = null;
+      pendingRequestIds.length = 0;
+      renderedMessageIds.clear();
+      Object.keys(streamingByRequestId).forEach((requestId) => removeStreamingMessage(requestId));
+      chatMessages.innerHTML = '<div class="empty-state">メッセージを送信してください。</div>';
+      chatMeta.textContent = `Session: ${activeSessionId.slice(0, 8)}... / 作業フォルダ: ~/${data.workingDirectoryRelativePath || ''}`;
+      enableMessageInput();
+      setAiStatus('idle', 'AI状態: 待機中');
+      stopSessionSyncPolling();
+      messageInput.focus();
+    })
+    .catch((error) => {
+      alert(`セッション開始に失敗しました: ${error.message}`);
+    })
+    .finally(() => {
+      startSessionBtn.disabled = false;
+    });
+});
+
+sendBtn.addEventListener('click', sendMessage);
+messageInput.addEventListener('keypress', (event) => {
+  if (event.key === 'Enter') {
+    sendMessage();
+  }
+});
+
+function sendMessage() {
+  const text = messageInput.value.trim();
+  if (!text || !activeSessionId) {
+    return;
+  }
+
+  messageInput.value = '';
+  setAiStatus('responding', 'AI状態: キュー投入中...');
+
+  fetch(`/api/chat-sessions/${activeSessionId}/messages`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message: text })
+  })
+    .then((res) => res.json())
+    .then((data) => {
+      if (data.error) {
+        throw new Error(data.error);
+      }
+      pendingRequestIds.push(data.requestId);
+      if (!activeRequestId) {
+        activeRequestId = data.requestId;
+        activeRequestStartedAt = Date.now();
+      }
+      setAiStatus('responding', `AI状態: 回答中...（待ち ${pendingRequestIds.length} 件）`);
+      startSessionSyncPolling();
+    })
+    .catch((error) => {
+      alert(`送信に失敗しました: ${error.message}`);
+      messageInput.value = text;
+      setAiStatus('error', 'AI状態: 送信失敗');
+    });
+}
+
+function fetchQueueStatus() {
+  fetch('/api/status')
+    .then((res) => res.json())
+    .then((status) => updateQueueStatus(status))
+    .catch((error) => console.error('Queue status fetch failed:', error));
+}
+
 function updateQueueStatus(status) {
-  console.log('🔄 Updating queue status:', status);
   queueCountSpan.textContent = `キュー: ${status.queued}`;
   runningCountSpan.textContent = `実行中: ${status.running}`;
 }
 
-function renderResults() {
-  console.log('🎨 Rendering results. Total:', results.length);
-
-  if (results.length === 0) {
-    resultsList.innerHTML = `
-      <div class="empty-state">
-        <p>まだリクエストがありません...</p>
-      </div>
-    `;
-    return;
-  }
-
-  resultsList.innerHTML = results.map(result => createResultCard(result)).join('');
-}
-
-function fetchTaskSnapshot() {
-  fetch('/api/tasks')
+function loadDirectories(relativePath) {
+  const query = encodeURIComponent(relativePath || '');
+  fetch(`/api/directories?path=${query}`)
     .then((res) => res.json())
     .then((data) => {
-      if (!data || !Array.isArray(data.tasks)) {
-        return;
+      if (data.error) {
+        throw new Error(data.error);
       }
-      results = data.tasks.map((task) => ({
-        taskId: task.taskId,
-        prompt: task.prompt,
-        createdAt: task.createdAt ? new Date(task.createdAt) : new Date(),
-        status: task.status,
-        result: task.result,
-        completedAt: task.completedAt ? new Date(task.completedAt) : null
-      }));
-      updateQueueStatus(data.queueStatus || { queued: 0, running: 0 });
-      renderResults();
+      currentRelativePath = data.currentRelativePath || '';
+      parentRelativePath = data.parentRelativePath;
+      currentPathLabel.textContent = `~/${currentRelativePath}`;
+      renderDirectoryList(data.directories || []);
     })
-    .catch((err) => {
-      console.error('❌ Failed to load task snapshot:', err);
+    .catch((error) => {
+      alert(`フォルダ一覧の取得に失敗しました: ${error.message}`);
     });
 }
 
-function createResultCard(result) {
-  const status = result.status || 'queued';
-  const isCompleted = status === 'completed';
-  const isFailed = status === 'failed';
-  const isRunning = status === 'running';
-
-  const createdTime = new Date(result.createdAt).toLocaleString('ja-JP');
-  let completedTime = '';
-  if (result.completedAt) {
-    completedTime = new Date(result.completedAt).toLocaleString('ja-JP');
+function renderDirectoryList(directories) {
+  if (!directories.length) {
+    directoryList.innerHTML = '<div class="empty-state">サブフォルダがありません。</div>';
+    return;
   }
 
-  let content = '';
-  if (isCompleted && result.result) {
-    const markdownText = result.result.stdout || String(result.result);
-    content = `
-      <div class="card-content markdown">
-        ${renderMarkdown(markdownText)}
-      </div>
-    `;
-  } else if (isFailed && result.result) {
-    const errorText = result.result.error || String(result.result);
-    content = `
-      <div class="card-content error">
-        ${escapeHtml(errorText)}
-      </div>
-    `;
-  } else if (isRunning) {
-    content = `
-      <div class="card-content">
-        <div style="text-align: center; color: #667eea;">
-          <span style="animation: blink 1.4s infinite;">■</span>
-          <span style="animation: blink 1.4s 0.2s infinite;">■</span>
-          <span style="animation: blink 1.4s 0.4s infinite;">■</span>
-          処理中...
-        </div>
-      </div>
-    `;
-  } else {
-    content = `
-      <div class="card-content">
-        キュー待機中...
-      </div>
-    `;
-  }
+  directoryList.innerHTML = directories
+    .map((directory) => {
+      const isSelected = selectedRelativePath === directory.relativePath;
+      return `
+        <button class="directory-item ${isSelected ? 'selected' : ''}" data-path="${escapeHtml(directory.relativePath)}">
+          <span>📁 ${escapeHtml(directory.name)}</span>
+          <span class="path">~/${escapeHtml(directory.relativePath)}</span>
+        </button>
+      `;
+    })
+    .join('');
 
-  const statusBadgeClass = status;
-  const statusText = getStatusText(status);
-  const prompt = result.prompt || '（プロンプト不明）';
-
-  const detailsOpen = isCompleted || isFailed ? 'open' : '';
-  const detailsLabel = isCompleted
-    ? '結果を表示'
-    : isFailed
-      ? 'エラー詳細'
-      : isRunning
-        ? '実行中'
-        : '待機中';
-
-  return `
-    <div class="result-card ${status}">
-      <div class="card-header">
-        <div class="card-title">タスク #${result.taskId.substring(0, 8)}</div>
-        <span class="status-badge ${statusBadgeClass}">${statusText}</span>
-      </div>
-      <div class="card-meta">
-        <span>📝 プロンプト: ${escapeHtml(prompt)}</span>
-        <span>📅 作成: ${createdTime}</span>
-        ${completedTime ? `<span>✅ 完了: ${completedTime}</span>` : ''}
-      </div>
-      <details class="result-details" ${detailsOpen}>
-        <summary>${detailsLabel}</summary>
-        ${content}
-      </details>
-    </div>
-  `;
+  const directoryButtons = directoryList.querySelectorAll('.directory-item');
+  directoryButtons.forEach((button) => {
+    const pathValue = button.getAttribute('data-path');
+    button.addEventListener('click', () => {
+      selectedRelativePath = pathValue;
+      selectedFolderLabel.textContent = `~/${selectedRelativePath}`;
+      renderDirectoryList(directories);
+    });
+    button.addEventListener('dblclick', () => {
+      loadDirectories(pathValue);
+    });
+  });
 }
 
-function getStatusText(status) {
-  const statusMap = {
-    'queued': 'キュー中',
-    'running': '実行中',
-    'completed': '完了',
-    'failed': '失敗'
-  };
-  return statusMap[status] || status;
+function appendMessage(message) {
+  if (!message.messageId || renderedMessageIds.has(message.messageId)) {
+    return;
+  }
+  renderedMessageIds.add(message.messageId);
+  if (chatMessages.querySelector('.empty-state')) {
+    chatMessages.innerHTML = '';
+  }
+
+  const roleClass = message.role === 'assistant' ? 'assistant' : 'user';
+  const contentHtml = roleClass === 'assistant'
+    ? renderMarkdown(message.content)
+    : escapeHtml(message.content).replace(/\n/g, '<br>');
+  const wrapper = document.createElement('div');
+  wrapper.className = `chat-message ${roleClass}`;
+  wrapper.innerHTML = `
+    <div class="meta">${roleClass === 'assistant' ? 'Copilot' : 'You'} · ${new Date(message.createdAt).toLocaleString('ja-JP')}</div>
+    <div class="content">${contentHtml}</div>
+  `;
+  chatMessages.appendChild(wrapper);
+  chatMessages.scrollTop = chatMessages.scrollHeight;
+}
+
+function appendStreamingChunk(requestId, chunk) {
+  if (!streamingByRequestId[requestId]) {
+    if (chatMessages.querySelector('.empty-state')) {
+      chatMessages.innerHTML = '';
+    }
+    const wrapper = document.createElement('div');
+    wrapper.className = 'chat-message assistant streaming';
+    wrapper.setAttribute('id', `stream-${requestId}`);
+    wrapper.innerHTML = `
+      <div class="meta">Copilot · 生成中...</div>
+      <div class="content" id="stream-content-${requestId}"></div>
+    `;
+    chatMessages.appendChild(wrapper);
+    streamingByRequestId[requestId] = true;
+  }
+
+  const contentEl = document.getElementById(`stream-content-${requestId}`);
+  if (!contentEl) {
+    return;
+  }
+  contentEl.innerHTML += escapeHtml(chunk).replace(/\n/g, '<br>');
+  chatMessages.scrollTop = chatMessages.scrollHeight;
+}
+
+function removeStreamingMessage(requestId) {
+  delete streamingByRequestId[requestId];
+  const element = document.getElementById(`stream-${requestId}`);
+  if (element) {
+    element.remove();
+  }
+}
+
+function finalizeStreamingMessage(requestId, message) {
+  const wrapper = document.getElementById(`stream-${requestId}`);
+  const contentEl = document.getElementById(`stream-content-${requestId}`);
+  if (!wrapper || !contentEl) {
+    return;
+  }
+
+  wrapper.classList.remove('streaming');
+  wrapper.classList.add('assistant');
+
+  const metaEl = wrapper.querySelector('.meta');
+  if (metaEl) {
+    metaEl.textContent = `Copilot · ${new Date(message.createdAt).toLocaleString('ja-JP')}`;
+  }
+  contentEl.innerHTML = renderMarkdown(message.content);
+  delete streamingByRequestId[requestId];
+  chatMessages.scrollTop = chatMessages.scrollHeight;
+}
+
+function enableMessageInput() {
+  sendBtn.disabled = false;
+  messageInput.disabled = false;
+}
+
+function disableMessageInput() {
+  sendBtn.disabled = true;
+  messageInput.disabled = true;
+}
+
+function startSessionSyncPolling() {
+  if (sessionSyncTimerId || !activeSessionId) {
+    return;
+  }
+  sessionSyncTimerId = setInterval(() => {
+    if (!activeSessionId) {
+      stopSessionSyncPolling();
+      return;
+    }
+    fetch(`/api/chat-sessions/${activeSessionId}`)
+      .then((res) => res.json())
+      .then((data) => {
+        if (!data || !Array.isArray(data.messages)) {
+          return;
+        }
+        data.messages.forEach((message) => appendMessage(message));
+        const hasAssistantAfterRequest = data.messages.some((message) => {
+          if (!activeRequestId) {
+            return false;
+          }
+          if (message.role !== 'assistant') {
+            return false;
+          }
+          const createdAt = new Date(message.createdAt).getTime();
+          return createdAt >= (activeRequestStartedAt || 0);
+        });
+        if (hasAssistantAfterRequest && activeRequestId) {
+          removeStreamingMessage(activeRequestId);
+          shiftCompletedRequest(activeRequestId);
+        }
+      })
+      .catch(() => {
+        // Ignore transient polling errors.
+      });
+  }, 2000);
+}
+
+function stopSessionSyncPolling() {
+  if (sessionSyncTimerId) {
+    clearInterval(sessionSyncTimerId);
+    sessionSyncTimerId = null;
+  }
+}
+
+function shiftCompletedRequest(requestId) {
+  if (requestId) {
+    const index = pendingRequestIds.indexOf(requestId);
+    if (index >= 0) {
+      pendingRequestIds.splice(index, 1);
+    } else if (pendingRequestIds.length > 0) {
+      pendingRequestIds.shift();
+    }
+  } else if (pendingRequestIds.length > 0) {
+    pendingRequestIds.shift();
+  }
+
+  activeRequestId = pendingRequestIds.length > 0 ? pendingRequestIds[0] : null;
+  activeRequestStartedAt = activeRequestId ? Date.now() : null;
+
+  if (activeRequestId) {
+    setAiStatus('responding', `AI状態: 回答中...（待ち ${pendingRequestIds.length} 件）`);
+    startSessionSyncPolling();
+  } else {
+    setAiStatus('idle', 'AI状態: 待機中');
+    stopSessionSyncPolling();
+  }
+}
+
+function setAiStatus(mode, text) {
+  aiStatus.classList.remove('idle', 'responding', 'error');
+  aiStatus.classList.add(mode);
+  aiStatusText.textContent = text;
+
+  if (mode === 'responding') {
+    if (!aiRespondingSince) {
+      aiRespondingSince = Date.now();
+    }
+    if (!aiStatusTimerId) {
+      aiStatusTimerId = setInterval(() => {
+        if (!aiRespondingSince) {
+          aiStatusElapsed.textContent = '';
+          return;
+        }
+        const seconds = Math.floor((Date.now() - aiRespondingSince) / 1000);
+        aiStatusElapsed.textContent = `${seconds}s`;
+      }, 300);
+    }
+  } else {
+    aiRespondingSince = null;
+    aiStatusElapsed.textContent = '';
+    if (aiStatusTimerId) {
+      clearInterval(aiStatusTimerId);
+      aiStatusTimerId = null;
+    }
+  }
 }
 
 function escapeHtml(text) {
   const div = document.createElement('div');
-  div.textContent = text;
+  div.textContent = String(text || '');
   return div.innerHTML;
 }
 
 function renderMarkdown(text) {
   if (window.marked && typeof window.marked.parse === 'function') {
-    return window.marked.parse(text);
+    return window.marked.parse(String(text || ''));
   }
   return escapeHtml(text).replace(/\n/g, '<br>');
 }
-
-// Connection events
-socket.on('connect', () => {
-  console.log('Connected to server');
-  requestBtn.disabled = false;
-});
-
-socket.on('disconnect', () => {
-  console.log('Disconnected from server');
-  requestBtn.disabled = true;
-});
-
-// Initial render
-renderResults();

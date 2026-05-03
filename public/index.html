@@ -4,43 +4,54 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Copilot Story Server</title>
+  <title>Copilot Folder Chat Server</title>
   <link rel="stylesheet" href="style.css">
 </head>
 
 <body>
   <div class="container">
     <header>
-      <h1>🚀 Copilot Story Queue Server</h1>
-      <p>複数のリクエストをキューで管理してcpilot AIに面白い話を生成させます</p>
+      <h1>📁 Copilot Folder Chat</h1>
+      <p>ホーム配下の任意フォルダで Copilot CLI チャットを開始し、Web UI で進行できます</p>
     </header>
 
     <main>
-      <section class="control-panel">
-        <div class="input-group">
-          <input type="text" id="promptInput" class="prompt-input" placeholder="例: 面白い話して、プログラミングについて教えて、etc."
-            value="面白い話して" />
-          <button id="requestBtn" class="btn btn-primary">✨ リクエスト送信</button>
-        </div>
-        <div id="queueStatus" class="status">
-          <span id="queueCount">キュー: 0</span>
-          <span id="runningCount">実行中: 0</span>
-        </div>
+      <section class="status-bar">
+        <span id="queueCount">キュー: 0</span>
+        <span id="runningCount">実行中: 0</span>
       </section>
 
-      <section class="results-section">
-        <h2>処理結果</h2>
-        <div id="resultsList" class="results-list">
-          <div class="empty-state">
-            <p>まだリクエストがありません...</p>
-          </div>
+      <section class="panel">
+        <h2>1. 作業フォルダを選択</h2>
+        <div class="folder-toolbar">
+          <button id="upDirBtn" class="btn">⬆ 親へ</button>
+          <button id="reloadDirBtn" class="btn">🔄 更新</button>
+          <span id="currentPathLabel">~/</span>
+        </div>
+        <div id="directoryList" class="directory-list"></div>
+        <div class="selected-folder">
+          選択中: <strong id="selectedFolderLabel">未選択</strong>
+        </div>
+        <button id="startSessionBtn" class="btn btn-primary">💬 このフォルダでチャット開始</button>
+      </section>
+
+      <section class="panel">
+        <h2>2. チャット</h2>
+        <div id="chatMeta" class="chat-meta">セッション未開始</div>
+        <div id="aiStatus" class="ai-status idle">
+          <span class="dot"></span>
+          <span id="aiStatusText">AI状態: セッション未開始</span>
+          <span id="aiStatusElapsed" class="elapsed"></span>
+        </div>
+        <div id="chatMessages" class="chat-messages">
+          <div class="empty-state">セッションを開始すると会話がここに表示されます。</div>
+        </div>
+        <div class="chat-input-row">
+          <input type="text" id="messageInput" class="message-input" placeholder="メッセージを入力..." />
+          <button id="sendBtn" class="btn btn-primary" disabled>送信</button>
         </div>
       </section>
     </main>
-
-    <footer>
-      <p>Node.js + Express + Socket.IO で実装されたリアルタイムキューシステム</p>
-    </footer>
   </div>
 
   <script src="/socket.io/socket.io.js"></script>
