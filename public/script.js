@@ -14,6 +14,11 @@ const aiStatusElapsed = document.getElementById('aiStatusElapsed');
 const chatMessages = document.getElementById('chatMessages');
 const messageInput = document.getElementById('messageInput');
 const sendBtn = document.getElementById('sendBtn');
+const fileTree = document.getElementById('fileTree');
+const fileContent = document.getElementById('fileContent');
+const filePathLabel = document.getElementById('filePathLabel');
+const viewerRootLabel = document.getElementById('viewerRootLabel');
+const reloadViewerBtn = document.getElementById('reloadViewerBtn');
 
 const queueCountSpan = document.getElementById('queueCount');
 const runningCountSpan = document.getElementById('runningCount');
@@ -24,6 +29,10 @@ let selectedRelativePath = '';
 let activeSessionId = null;
 let activeRequestId = null;
 let activeRequestStartedAt = null;
+let viewerRootRelativePath = '';
+let viewerSelectedFile = '';
+const viewerEntriesByDir = new Map();
+const viewerOpenDirs = new Set(['']);
 const pendingRequestIds = [];
 const renderedMessageIds = new Set();
 const streamingByRequestId = {};
@@ -156,6 +165,16 @@ reloadDirBtn.addEventListener('click', () => {
   loadDirectories(currentRelativePath);
 });
 
+reloadViewerBtn.addEventListener('click', () => {
+  if (!viewerRootRelativePath) {
+    return;
+  }
+  viewerEntriesByDir.clear();
+  viewerOpenDirs.clear();
+  viewerOpenDirs.add('');
+  loadDirectoryEntries('');
+});
+
 startSessionBtn.addEventListener('click', () => {
   if (!selectedRelativePath) {
     alert('フォルダを選択してください');
@@ -181,6 +200,7 @@ startSessionBtn.addEventListener('click', () => {
       Object.keys(streamingByRequestId).forEach((requestId) => removeStreamingMessage(requestId));
       chatMessages.innerHTML = '<div class="empty-state">メッセージを送信してください。</div>';
       chatMeta.textContent = `Session: ${activeSessionId.slice(0, 8)}... / 作業フォルダ: ~/${data.workingDirectoryRelativePath || ''}`;
+      updateViewerRoot(data.workingDirectoryRelativePath || '');
       enableMessageInput();
       setAiStatus('idle', 'AI状態: 待機中');
       stopSessionSyncPolling();
@@ -289,6 +309,7 @@ function renderDirectoryList(directories) {
     button.addEventListener('click', () => {
       selectedRelativePath = pathValue;
       selectedFolderLabel.textContent = `~/${selectedRelativePath}`;
+      updateViewerRoot(selectedRelativePath);
       renderDirectoryList(directories);
     });
     button.addEventListener('dblclick', () => {
@@ -447,6 +468,171 @@ function shiftCompletedRequest(requestId) {
     setAiStatus('idle', 'AI状態: 待機中');
     stopSessionSyncPolling();
   }
+}
+
+function updateViewerRoot(rootRelativePath) {
+  viewerRootRelativePath = rootRelativePath || '';
+  viewerSelectedFile = '';
+  viewerEntriesByDir.clear();
+  viewerOpenDirs.clear();
+  viewerOpenDirs.add('');
+  viewerRootLabel.textContent = viewerRootRelativePath ? `ルート: ~/${viewerRootRelativePath}` : 'ルート: 未選択';
+  filePathLabel.textContent = 'ファイル未選択';
+  fileContent.innerHTML = '<div class="empty-state">左の一覧からファイルを選択してください。</div>';
+  if (!viewerRootRelativePath) {
+    fileTree.innerHTML = '<div class="empty-state">フォルダを選択するとファイル一覧が表示されます。</div>';
+    return;
+  }
+  loadDirectoryEntries('');
+}
+
+function iconForFile(name, type) {
+  if (type === 'dir') return '📁';
+  const ext = (name.includes('.') ? name.slice(name.lastIndexOf('.')).toLowerCase() : '');
+  const iconMap = {
+    '.md': '📝',
+    '.json': '📋',
+    '.js': '📜',
+    '.ts': '📜',
+    '.css': '🎨',
+    '.html': '🌐',
+    '.png': '🖼️',
+    '.jpg': '🖼️',
+    '.jpeg': '🖼️',
+    '.svg': '🖼️'
+  };
+  return iconMap[ext] || '📄';
+}
+
+function renderTreeNodes(dirPath = '', depth = 0) {
+  const entries = viewerEntriesByDir.get(dirPath) || [];
+  return entries
+    .map((node) => {
+      const rowClass = node.type === 'file' && viewerSelectedFile === node.path ? 'tree-row active' : 'tree-row';
+      if (node.type === 'dir') {
+        const isOpen = viewerOpenDirs.has(node.path);
+        const icon = isOpen ? '📂' : '📁';
+        const children = isOpen ? renderTreeNodes(node.path, depth + 1) : '';
+        return `
+          <div class="tree-row" style="padding-left:${depth * 14 + 8}px" data-dir-path="${escapeHtml(node.path)}">
+            <span>${icon}</span>
+            <span class="tree-name">${escapeHtml(node.name)}</span>
+          </div>
+          <div class="tree-children">${children}</div>
+        `;
+      }
+      return `
+        <div class="${rowClass}" style="padding-left:${depth * 14 + 8}px" data-file-path="${escapeHtml(node.path)}">
+          <span>${iconForFile(node.name, 'file')}</span>
+          <span class="tree-name">${escapeHtml(node.name)}</span>
+        </div>
+      `;
+    })
+    .join('');
+}
+
+function bindFileTreeClickHandlers() {
+  const dirRows = fileTree.querySelectorAll('[data-dir-path]');
+  dirRows.forEach((row) => {
+    const dirPath = row.getAttribute('data-dir-path');
+    row.addEventListener('click', () => {
+      if (dirPath === null) return;
+      toggleViewerDirectory(dirPath);
+    });
+  });
+
+  const rows = fileTree.querySelectorAll('[data-file-path]');
+  rows.forEach((row) => {
+    const filePath = row.getAttribute('data-file-path');
+    row.addEventListener('click', () => {
+      if (!filePath) return;
+      viewerSelectedFile = filePath;
+      bindFileTreeSelection();
+      openViewerFile(filePath);
+    });
+  });
+}
+
+function bindFileTreeSelection() {
+  fileTree.querySelectorAll('[data-file-path]').forEach((row) => {
+    row.classList.remove('active');
+    if (row.getAttribute('data-file-path') === viewerSelectedFile) {
+      row.classList.add('active');
+    }
+  });
+}
+
+function renderViewerTree() {
+  const html = renderTreeNodes('', 0);
+  fileTree.innerHTML = html || '<div class="empty-state">ファイルがありません。</div>';
+  bindFileTreeClickHandlers();
+  bindFileTreeSelection();
+}
+
+function loadDirectoryEntries(dirPath) {
+  if (!viewerRootRelativePath) return;
+  if (!viewerEntriesByDir.has(dirPath)) {
+    fileTree.innerHTML = '<div class="empty-state">ファイル一覧を読み込み中...</div>';
+  }
+
+  fetch(`/api/files/tree?root=${encodeURIComponent(viewerRootRelativePath)}&dir=${encodeURIComponent(dirPath)}`)
+    .then((res) => res.json())
+    .then((data) => {
+      if (data.error) {
+        throw new Error(data.error);
+      }
+      viewerEntriesByDir.set(dirPath, data.entries || []);
+      renderViewerTree();
+    })
+    .catch((error) => {
+      fileTree.innerHTML = `<div class="empty-state">読み込み失敗: ${escapeHtml(error.message)}</div>`;
+    });
+}
+
+function toggleViewerDirectory(dirPath) {
+  if (viewerOpenDirs.has(dirPath)) {
+    viewerOpenDirs.delete(dirPath);
+    renderViewerTree();
+    return;
+  }
+  viewerOpenDirs.add(dirPath);
+  if (viewerEntriesByDir.has(dirPath)) {
+    renderViewerTree();
+    return;
+  }
+  loadDirectoryEntries(dirPath);
+}
+
+function openViewerFile(filePath) {
+  if (!viewerRootRelativePath || !filePath) {
+    return;
+  }
+  filePathLabel.textContent = filePath;
+  fileContent.innerHTML = '<div class="empty-state">読み込み中...</div>';
+
+  fetch(`/api/files/content?root=${encodeURIComponent(viewerRootRelativePath)}&file=${encodeURIComponent(filePath)}`)
+    .then(async (res) => {
+      const contentType = (res.headers.get('content-type') || '').toLowerCase();
+      if (!res.ok) {
+        const json = await res.json().catch(() => ({ error: '読み込み失敗' }));
+        throw new Error(json.error || '読み込み失敗');
+      }
+      if (contentType.startsWith('image/')) {
+        const blob = await res.blob();
+        const objectUrl = URL.createObjectURL(blob);
+        fileContent.innerHTML = `<img src="${objectUrl}" alt="${escapeHtml(filePath)}">`;
+        return;
+      }
+      const text = await res.text();
+      if (filePath.toLowerCase().endsWith('.md')) {
+        fileContent.innerHTML = renderMarkdown(text);
+      } else {
+        fileContent.innerHTML = `<pre>${escapeHtml(text)}</pre>`;
+      }
+    })
+    .catch((error) => {
+      fileContent.innerHTML = `<div class="empty-state">読み込み失敗: ${escapeHtml(error.message)}</div>`;
+    });
 }
 
 function setAiStatus(mode, text) {

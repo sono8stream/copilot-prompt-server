@@ -8,16 +8,17 @@ body {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   background: #f3f4f6;
   color: #111827;
-  padding: 20px;
+  padding: 0;
 }
 
 .container {
-  max-width: 980px;
-  margin: 0 auto;
-  background: #fff;
-  border-radius: 12px;
-  box-shadow: 0 12px 28px rgba(15, 23, 42, 0.12);
-  overflow: hidden;
+  width: 100%;
+  max-width: none;
+  margin: 0;
+  background: transparent;
+  border-radius: 0;
+  box-shadow: none;
+  overflow: visible;
 }
 
 header {
@@ -36,7 +37,7 @@ header p {
 }
 
 main {
-  padding: 20px;
+  padding: 14px;
   display: grid;
   gap: 16px;
 }
@@ -58,7 +59,7 @@ main {
 .panel {
   border: 1px solid #e5e7eb;
   border-radius: 10px;
-  padding: 16px;
+  padding: 12px;
   display: grid;
   gap: 12px;
 }
@@ -286,6 +287,150 @@ main {
   font-size: 1rem;
 }
 
+.viewer-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+#viewerRootLabel {
+  font-family: 'SFMono-Regular', Menlo, monospace;
+  font-size: 0.82rem;
+  color: #374151;
+}
+
+.viewer-layout {
+  display: grid;
+  grid-template-columns: 300px 1fr;
+  gap: 8px;
+  overflow: visible;
+  min-height: 320px;
+}
+
+.file-tree {
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #f8fafc;
+  max-height: 520px;
+  overflow: auto;
+  padding: 8px;
+}
+
+.tree-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 6px;
+  padding: 5px 8px;
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+
+.tree-row:hover {
+  background: #e5e7eb;
+}
+
+.tree-row.active {
+  background: #dbeafe;
+  color: #1e40af;
+}
+
+.tree-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tree-children {
+  margin-left: 16px;
+}
+
+.file-view {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.file-path-label {
+  border-bottom: 1px solid #e5e7eb;
+  background: #f8fafc;
+  font-family: 'SFMono-Regular', Menlo, monospace;
+  font-size: 0.8rem;
+  color: #4b5563;
+  padding: 8px 10px;
+  white-space: nowrap;
+  overflow-x: auto;
+}
+
+.file-content {
+  flex: 1;
+  overflow: auto;
+  padding: 12px;
+  background: #fff;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  white-space: normal;
+}
+
+.file-content p,
+.file-content li,
+.file-content blockquote,
+.file-content td,
+.file-content th {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.file-content ul,
+.file-content ol {
+  margin: 0.5em 0 0.5em 1.25em;
+  padding-left: 1.1em;
+  list-style-position: outside;
+}
+
+.file-content li {
+  margin: 0.2em 0;
+}
+
+.file-content pre {
+  background: #111827;
+  color: #f9fafb;
+  border-radius: 6px;
+  padding: 10px;
+  overflow-x: auto;
+  max-width: 100%;
+  white-space: pre;
+  font-size: 0.82rem;
+}
+
+.file-content table {
+  width: max-content;
+  min-width: 100%;
+  border-collapse: collapse;
+  display: block;
+  overflow-x: auto;
+}
+
+.file-content th,
+.file-content td {
+  border: 1px solid #d1d5db;
+  padding: 6px 8px;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.file-content img {
+  max-width: 100%;
+  height: auto;
+  display: block;
+  object-fit: contain;
+}
+
 .empty-state {
   color: #9ca3af;
   text-align: center;
@@ -294,10 +439,19 @@ main {
 
 @media (max-width: 768px) {
   body {
-    padding: 10px;
+    padding: 0;
   }
 
   .chat-input-row {
     flex-direction: column;
+  }
+
+  .viewer-layout {
+    grid-template-columns: 1fr;
+    gap: 6px;
+  }
+
+  .file-tree {
+    max-height: 220px;
   }
 }

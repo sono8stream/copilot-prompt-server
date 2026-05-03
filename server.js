@@ -30,6 +30,9 @@ const io = socketIO(server, {
 
 app.use(express.static(path.join(__dirname, 'public')));
 app.use(express.json());
+app.get('/vendor/marked.min.js', (_req, res) => {
+  res.sendFile(path.join(__dirname, 'node_modules', 'marked', 'lib', 'marked.umd.js'));
+});
 
 function writeLog(logEntry) {
   const timestamp = new Date().toISOString();
@@ -100,6 +103,54 @@ function listDirectories(relativePathInput) {
     parentRelativePath: parentRelativePath,
     directories: directories
   };
+}
+
+const FILE_MIME_TYPES = {
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.ico': 'image/x-icon',
+  '.bmp': 'image/bmp',
+  '.html': 'text/html; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.ts': 'text/plain; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.md': 'text/markdown; charset=utf-8',
+  '.txt': 'text/plain; charset=utf-8'
+};
+
+const IMAGE_EXTENSIONS = new Set(['.svg', '.png', '.jpg', '.jpeg', '.gif', '.webp', '.ico', '.bmp']);
+
+function buildFileTree(absPath, rootAbsPath) {
+  const stat = fs.statSync(absPath);
+  const relativeFromRoot = path.relative(rootAbsPath, absPath).replace(/\\/g, '/');
+  const nodePath = relativeFromRoot === '' ? '' : relativeFromRoot;
+  const name = nodePath ? path.basename(absPath) : path.basename(rootAbsPath);
+
+  if (stat.isFile()) {
+    return { type: 'file', name, path: nodePath };
+  }
+
+  const entries = fs.readdirSync(absPath, { withFileTypes: true });
+  const children = entries
+    .filter((entry) => {
+      if (entry.name === '.github') return true;
+      if (entry.name.startsWith('.')) return false;
+      if (entry.name === 'node_modules') return false;
+      if (entry.name === '.DS_Store') return false;
+      return true;
+    })
+    .map((entry) => buildFileTree(path.join(absPath, entry.name), rootAbsPath))
+    .sort((a, b) => {
+      if (a.type !== b.type) return a.type === 'dir' ? -1 : 1;
+      return a.name.localeCompare(b.name);
+    });
+
+  return { type: 'dir', name, path: nodePath, children };
 }
 
 function stripAnsi(input) {
@@ -517,6 +568,96 @@ app.get('/api/directories', (req, res) => {
     });
   } catch (error) {
     res.status(400).json({ error: error.message });
+  }
+});
+
+app.get('/api/files/tree', (req, res) => {
+  try {
+    const rootRelative = typeof req.query.root === 'string' ? req.query.root : '';
+    const dirRelative = typeof req.query.dir === 'string' ? req.query.dir : '';
+    if (!rootRelative) {
+      return res.status(400).json({ error: 'root is required' });
+    }
+    const { absolutePath: rootAbsolutePath } = resolveHomeDirectory(rootRelative);
+    const targetAbsolutePath = path.resolve(rootAbsolutePath, dirRelative || '.');
+    const relativeFromRoot = path.relative(rootAbsolutePath, targetAbsolutePath);
+    if (relativeFromRoot.startsWith('..') || path.isAbsolute(relativeFromRoot)) {
+      return res.status(403).json({ error: 'Forbidden path' });
+    }
+    if (!fs.existsSync(targetAbsolutePath) || !fs.statSync(targetAbsolutePath).isDirectory()) {
+      return res.status(404).json({ error: 'Directory not found' });
+    }
+
+    const entries = fs.readdirSync(targetAbsolutePath, { withFileTypes: true })
+      .filter((entry) => {
+        if (entry.name === '.github') return true;
+        if (entry.name.startsWith('.')) return false;
+        if (entry.name === 'node_modules') return false;
+        if (entry.name === '.DS_Store') return false;
+        return true;
+      })
+      .map((entry) => {
+        const entryPath = path.posix.join(dirRelative, entry.name).replace(/^\/+/, '');
+        return {
+          type: entry.isDirectory() ? 'dir' : 'file',
+          name: entry.name,
+          path: entryPath
+        };
+      })
+      .sort((a, b) => {
+        if (a.type !== b.type) return a.type === 'dir' ? -1 : 1;
+        return a.name.localeCompare(b.name);
+      });
+
+    return res.json({
+      root: rootRelative,
+      dir: dirRelative,
+      entries: entries
+    });
+  } catch (error) {
+    return res.status(400).json({ error: error.message });
+  }
+});
+
+app.get('/api/files/content', (req, res) => {
+  try {
+    const rootRelative = typeof req.query.root === 'string' ? req.query.root : '';
+    const fileRelative = typeof req.query.file === 'string' ? req.query.file : '';
+    if (!rootRelative || !fileRelative) {
+      return res.status(400).json({ error: 'root and file are required' });
+    }
+
+    const { absolutePath: rootAbsolutePath } = resolveHomeDirectory(rootRelative);
+    const targetAbsolutePath = path.resolve(rootAbsolutePath, fileRelative);
+    const relativeFromRoot = path.relative(rootAbsolutePath, targetAbsolutePath);
+    if (relativeFromRoot.startsWith('..') || path.isAbsolute(relativeFromRoot)) {
+      return res.status(403).json({ error: 'Forbidden path' });
+    }
+    if (!fs.existsSync(targetAbsolutePath)) {
+      return res.status(404).json({ error: 'File not found' });
+    }
+    const stat = fs.statSync(targetAbsolutePath);
+    if (!stat.isFile()) {
+      return res.status(400).json({ error: 'Path is not a file' });
+    }
+    if (stat.size > 1024 * 1024 * 2) {
+      return res.status(413).json({ error: 'File too large (max 2MB)' });
+    }
+
+    const ext = path.extname(targetAbsolutePath).toLowerCase();
+    const contentType = FILE_MIME_TYPES[ext] || 'text/plain; charset=utf-8';
+
+    if (IMAGE_EXTENSIONS.has(ext)) {
+      const buffer = fs.readFileSync(targetAbsolutePath);
+      res.setHeader('Content-Type', contentType);
+      return res.send(buffer);
+    }
+
+    const content = fs.readFileSync(targetAbsolutePath, 'utf-8');
+    res.setHeader('Content-Type', contentType);
+    return res.send(content);
+  } catch (error) {
+    return res.status(400).json({ error: error.message });
   }
 });
 

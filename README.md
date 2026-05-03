@@ -9,6 +9,8 @@
 - Web UI 上で会話を継続（履歴付きで各ターンをストリーミング実行）
 - 応答中でも次のメッセージを先行投入できる（サーバー側で順次処理）
 - Copilot CLI は `--name` / `--resume` を使って会話文脈を引き継ぐ
+- 選択フォルダ配下のファイルを閲覧できるファイルビューア（Markdown/画像/テキスト）
+- ファイルツリーは階層ごとの遅延読み込み（初回表示の高速化）
 - リクエストキュー管理（同時実行数 1）
 - 実行ログと `--share` セッションログ保存
 
@@ -67,6 +69,8 @@ npm start
 - `GET /api/status` キュー状況
 - `GET /api/tasks` タスク履歴
 - `GET /api/tasks/:taskId/session` `--share` の markdown ログ
+- `GET /api/files/tree?root=<relative-folder>` ファイルツリー取得
+- `GET /api/files/content?root=<relative-folder>&file=<relative-file>` ファイル内容取得
 
 ## 補足
 

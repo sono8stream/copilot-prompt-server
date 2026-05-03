@@ -51,11 +51,30 @@
           <button id="sendBtn" class="btn btn-primary" disabled>送信</button>
         </div>
       </section>
+
+      <section class="panel">
+        <h2>3. ファイルビューア</h2>
+        <div class="viewer-toolbar">
+          <span id="viewerRootLabel">ルート: 未選択</span>
+          <button id="reloadViewerBtn" class="btn">🔄 ファイル一覧更新</button>
+        </div>
+        <div class="viewer-layout">
+          <div id="fileTree" class="file-tree">
+            <div class="empty-state">フォルダを選択するとファイル一覧が表示されます。</div>
+          </div>
+          <div class="file-view">
+            <div id="filePathLabel" class="file-path-label">ファイル未選択</div>
+            <div id="fileContent" class="file-content">
+              <div class="empty-state">左の一覧からファイルを選択してください。</div>
+            </div>
+          </div>
+        </div>
+      </section>
     </main>
   </div>
 
   <script src="/socket.io/socket.io.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="/vendor/marked.min.js"></script>
   <script src="script.js"></script>
 </body>
 
